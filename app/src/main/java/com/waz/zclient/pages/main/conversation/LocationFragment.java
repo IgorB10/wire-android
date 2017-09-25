@@ -34,7 +34,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.provider.Settings;
-import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.v4.app.ActivityCompat;
 import android.support.v7.widget.Toolbar;
@@ -59,28 +58,20 @@ import com.google.android.gms.maps.model.BitmapDescriptorFactory;
 import com.google.android.gms.maps.model.CameraPosition;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.MarkerOptions;
-import com.waz.api.ConversationsList;
-import com.waz.api.IConversation;
 import com.waz.api.MessageContent;
-import com.waz.api.SyncState;
-import com.waz.zclient.BaseActivity;
+import com.waz.model.ConversationData;
 import com.waz.zclient.BuildConfig;
 import com.waz.zclient.OnBackPressedListener;
 import com.waz.zclient.R;
 import com.waz.zclient.controllers.accentcolor.AccentColorObserver;
 import com.waz.zclient.controllers.permission.RequestPermissionsObserver;
 import com.waz.zclient.controllers.userpreferences.IUserPreferencesController;
-import com.waz.zclient.core.stores.conversation.ConversationChangeRequester;
-import com.waz.zclient.core.stores.conversation.ConversationStoreObserver;
+import com.waz.zclient.conversation.ConversationController;
 import com.waz.zclient.pages.BaseFragment;
 import com.waz.zclient.tracking.GlobalTrackingController;
 import com.waz.zclient.ui.text.GlyphTextView;
 import com.waz.zclient.ui.views.TouchRegisteringFrameLayout;
-import com.waz.zclient.utils.LayoutSpec;
-import com.waz.zclient.utils.PermissionUtils;
-import com.waz.zclient.utils.StringUtils;
-import com.waz.zclient.utils.TrackingUtils;
-import com.waz.zclient.utils.ViewUtils;
+import com.waz.zclient.utils.*;
 
 import java.util.List;
 import java.util.Locale;
@@ -95,7 +86,6 @@ public class LocationFragment extends BaseFragment<LocationFragment.Container> i
                                                                                           GoogleApiClient.ConnectionCallbacks,
                                                                                           GoogleApiClient.OnConnectionFailedListener,
                                                                                           OnMapReadyCallback,
-                                                                                          ConversationStoreObserver,
                                                                                           RequestPermissionsObserver,
                                                                                           OnBackPressedListener,
                                                                                           AccentColorObserver,
@@ -279,7 +269,6 @@ public class LocationFragment extends BaseFragment<LocationFragment.Container> i
         super.onStart();
         getControllerFactory().getAccentColorController().addAccentColorObserver(this);
         getControllerFactory().getRequestPermissionsController().addObserver(this);
-        getStoreFactory().conversationStore().addConversationStoreObserver(this);
         if (PermissionUtils.hasSelfPermissions(getActivity(), LOCATION_PERMISSIONS)) {
             updateLastKnownLocation();
             if (!isLocationServicesEnabled()) {
@@ -291,16 +280,35 @@ public class LocationFragment extends BaseFragment<LocationFragment.Container> i
             checkIfLocationServicesEnabled = true;
             requestCurrentLocationButton.setVisibility(View.GONE);
         }
+
+        final ConversationController ctrl = inject(ConversationController.class);
+        ctrl.onConvChanged(new Callback<ConversationController.ConversationChange>() {
+            @Override
+            public void callback(ConversationController.ConversationChange change) {
+                if (change.toConvId() != null) {
+                    ctrl.withConvLoaded(change.toConvId(), new Callback<ConversationData>() {
+                        @Override
+                        public void callback(ConversationData conversationData) {
+                            toolbarTitle.setText(conversationData.displayName());
+                        }
+                    });
+                }
+            }
+        });
     }
 
     @Override
     public void onResume() {
         super.onResume();
         mapView.onResume();
-        IConversation currentConversation = getStoreFactory().conversationStore().getCurrentConversation();
-        if (currentConversation != null) {
-            toolbarTitle.setText(currentConversation.getName());
-        }
+
+        inject(ConversationController.class).withCurrentConvName(new Callback<String>() {
+            @Override
+            public void callback(String convName) {
+                toolbarTitle.setText(convName);
+            }
+        });
+
         if (!getControllerFactory().getUserPreferencesController().hasPerformedAction(IUserPreferencesController.SEND_LOCATION_MESSAGE)) {
             getControllerFactory().getUserPreferencesController().setPerformedAction(IUserPreferencesController.SEND_LOCATION_MESSAGE);
             Toast.makeText(getContext(), R.string.location_sharing__tip, Toast.LENGTH_LONG).show();
@@ -327,7 +335,6 @@ public class LocationFragment extends BaseFragment<LocationFragment.Container> i
 
     @Override
     public void onStop() {
-        getStoreFactory().conversationStore().removeConversationStoreObserver(this);
         getControllerFactory().getRequestPermissionsController().removeObserver(this);
         getControllerFactory().getAccentColorController().removeAccentColorObserver(this);
         super.onStop();
@@ -508,8 +515,14 @@ public class LocationFragment extends BaseFragment<LocationFragment.Container> i
                 }
 
                 getControllerFactory().getLocationController().hideShareLocation(location);
-                TrackingUtils.onSentLocationMessage(((BaseActivity) getActivity()).injectJava(GlobalTrackingController.class),
-                                                    getStoreFactory().conversationStore().getCurrentConversation());
+
+                inject(ConversationController.class).withCurrentConv(new Callback<ConversationData>() {
+                    @Override
+                    public void callback(ConversationData conv) {
+                        TrackingUtils.onSentLocationMessage(inject(GlobalTrackingController.class), conv);
+                    }
+                });
+
                 break;
         }
     }
@@ -640,30 +653,6 @@ public class LocationFragment extends BaseFragment<LocationFragment.Container> i
         canvas.drawCircle(size / 2, size / 2, innerCircleRadius, paint);
         marker = bitmap;
         return marker;
-    }
-
-    @Override
-    public void onConversationListUpdated(@NonNull ConversationsList conversationsList) {
-
-    }
-
-    @Override
-    public void onCurrentConversationHasChanged(IConversation fromConversation,
-                                                IConversation toConversation,
-                                                ConversationChangeRequester conversationChangerSender) {
-        if (toConversation != null) {
-            toolbarTitle.setText(toConversation.getName());
-        }
-    }
-
-    @Override
-    public void onConversationSyncingStateHasChanged(SyncState syncState) {
-
-    }
-
-    @Override
-    public void onMenuConversationHasChanged(IConversation fromConversation) {
-
     }
 
     @Override
